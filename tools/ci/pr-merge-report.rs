@@ -973,3 +973,5 @@ mod tests {
         assert!(render(&report).contains("| skipped | unavailable |"));
     }
 }
+
+// Observation marker: this comment-only change exercises the merged-PR report path.
