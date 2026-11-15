@@ -1,0 +1,169 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+# Qualify merge outcome reporting
+
+## Scope and ownership
+
+[Issue #14163](https://github.com/NVIDIA/NemoClaw/issues/14163) defines merge-outcome
+reporting under the maintainer-owned [session-report epic #14160](https://github.com/NVIDIA/NemoClaw/issues/14160).
+@deepujain owns this workflow's scope; repository automation maintainers own
+failures and recovery.
+
+Maintainers need GitHub-derived outcomes beside the opening session report.
+Revision counts are observed because complete push history is unavailable.
+The default-branch workflow and helper under `tools/ci/` serve merged PRs into
+`main` and `v1`, including forks, without session access or PR-code execution.
+
+GitHub runs the `pull_request_target` workflow from the base repository's
+default branch, including for PRs into `v1`, so install the workflow only on
+that branch. Its trigger selects the target branches. Install the reporter on
+each target branch (`main` and `v1`). The reporter validates merged PR metadata
+without a separate branch allowlist. This change installs the workflow and the
+`main` reporter; `v1` reports start only after the reporter is installed there.
+
+A merge whose selected revision lacks the reporter is skipped, so
+reporting starts with the next eligible merge into that branch. Each eligible PR
+gets one collapsed bot report. Runs serialize per PR and stop after 20 minutes.
+The workflow attempts to retain generated reports for 90 days. Failures before
+report generation have no report artifact. Existing comments stay intact;
+retries avoid duplicates. For a two-parent merge, the workflow selects the first
+parent. For a one-parent result, it walks past commits associated with the
+reported PR. The PR's recorded commit count bounds this walk. Each skipped
+commit must have one valid parent. Checkout starts only when no association
+page links the selected revision to the PR. Empty association pages are valid,
+including after a direct target-branch commit. Malformed responses, API failures,
+a PR-associated first parent of a two-parent merge, or an exhausted walk stop
+the job before checkout. Repository merge settings are not consulted.
+`actions/checkout` reads that revision with the workflow token. `persist-credentials: false` prevents Git credential
+persistence. Compile only that revision's reporter and never run PR code. Pass
+`GH_TOKEN` to API steps with the declared job permissions.
+
+Validation covers metadata, rejected parents and events, API refusal,
+publication readback, failure retention, and recovery. The
+[post-installation observation](#post-installation-observation) closes #14163
+once reports publish on both lines. It is not validation of the change that installs the
+workflow.
+
+## Local evidence
+
+The report workflow has two evidence owners. The standalone Rust tests cover
+metadata selection, rendering and publication recovery. The workflow adapter
+test executes the checked-in YAML with controlled API, compiler and checkout
+boundaries. Its publication-recovery scenario compiles and executes the real
+reporter. It uses Bash from `PATH`, Ruby's standard YAML parser and `jq`.
+Use Bash 5 or later to match the workflow runner.
+
+Run the local checks from the repository root:
+
+```sh
+rustfmt --edition 2024 --check tools/ci/pr-merge-report*.rs
+rustc --edition=2024 -D warnings --test tools/ci/pr-merge-report.rs -o /tmp/report-tests
+/tmp/report-tests
+rustc --edition=2024 -D warnings --test tools/ci/pr-merge-report-workflow.rs -o /tmp/adapter-tests
+/tmp/adapter-tests
+```
+
+After the commit endpoint confirms a missing historical revision, the report
+lists the history gap and retains available revisions. Reviews without commit
+attribution remain in the report without commit lookups or attributed follow-ups.
+Workflow-run and check-suite creation times determine which checks belong to
+the PR window. They do not prove when each individual check was created.
+On recovery, a complete queued-check snapshot identifies previously queued
+checks even if they start later. The bot comment retains this snapshot before
+the display table, bound to the repository, PR number and merged revision.
+Display truncation never removes snapshot entries. If the snapshot cannot fit,
+publication stops and retains the full report. Missing, malformed or mismatched
+snapshots stop recovery without another post. Previously queued checks keep
+unavailable start times and durations for that merge. New checks with a post-merge start are excluded. Newly seen checks with
+no start time are also excluded during recovery. Before the first publication,
+a queued check's suite supplies the available observation bound; GitHub exposes
+no individual creation timestamp. Checks already started after merge cannot
+establish membership without the snapshot.
+
+Actions searches split windows with more than 1,000 runs before pagination.
+Disjoint windows preserve discovery of removed revisions while retaining the
+PR, fork and merge-window filters. If one second exceeds the cap, collection
+stops before publication. The job log records the affected window; no report
+is generated from incomplete history. The reporter requires `gh` and `jq`.
+Repair and review-follow-up counts require a forward step in the retained PR
+commit order. A retry on an older SHA does not increase either count. Access
+failures, other API failures and missing merged PR revisions stop reporting.
+
+These tests do not run GitHub event selection, effective token permissions or
+the real checkout action. The `report` job runs on
+a merged `pull_request_target` closed event, verifies the trusted checkout,
+posts with the workflow token, compares the opening report before and after,
+and verifies one bot report for the merged head. Each attempt invokes the
+reporter once. A posting failure remains a job failure while summary and
+artifact retention still run.
+
+## Post-installation observation
+
+This procedure closes #14163 only after a report has published on each target
+branch, `main` and `v1`. The `v1` branch also needs its reporter from #14254. The
+procedure cannot run before this change merges, so it does not validate this
+change, and the runtime E2E inventory has no selector for it. The scenario is an
+approved contribution from a fork that changes `tools/ci/pr-merge-report.rs` and
+merges through normal review. Record it once. For the other branch, record the
+run URL, bot comment URL and artifact URL of its first published report. This
+document does not authorize creating or merging a qualification PR. The
+installation merge itself skips reporting when its selected revision lacks the
+helper.
+
+Inspect the real workflow run and its artifact.
+The name is `merge-outcomes-` followed by the run attempt, such as
+`merge-outcomes-1`. Record all of the following and the permitted-rerun
+recovery observation below when closing #14163:
+
+- The run uses the installed workflow revision and the merged fork PR's closed
+  event. The parent-association check passes before checkout. The checked-in
+  `report.permissions` block grants read access to contents, actions and checks,
+  and write access to pull requests. The run does not print token scopes, so the
+  successful association, check and Actions reads and the comment publication
+  in the run are the evidence that those operations worked.
+- `Record publication inputs` verifies the checkout against the selected revision
+  and rejects changed reporter source before compilation. The receipt identifies
+  that revision as `reporter_revision` and records its `reporter_blob`.
+- The intended PR has one collapsed bot report with its merged head SHA. The
+  reporter's successful publication step includes an identical API readback.
+- `Verify hosted publication` passes its opening-report comparison and one-report
+  check. The receipt has `report_unique: true` and `opening_report_count` of at
+  least one. The opening report stays intact.
+- For a rebase merge, query `repos/<repository>/commits/<sha>/pulls` for each
+  rewritten commit and retain the paginated responses. Every commit that the
+  merge introduced must list the merged PR, and the selected reporter revision
+  must be the first ancestor that does not. An empty response for an
+  introduced commit is a defect to report, not an accepted result.
+- Sample repair and review counts, diff totals, and check durations match the
+  merged PR's GitHub records. Retain the source records and expected and reported
+  values with the acceptance evidence.
+- Summary retention and artifact upload succeed. The artifact contains the full
+  report and `merge-outcomes-receipt.json` from that run attempt. The artifact
+  name and receipt's `run_attempt` match the selected attempt.
+- The receipt has `fork_modified_reporter: true`. An ordinary same-repository
+  run or a fork PR without a reporter change supplies smoke evidence only.
+
+Record the workflow run URL, attempt, installed `workflow_revision`,
+`reporter_revision`, `reporter_blob`, PR head SHA, comment URL and artifact URL.
+These fields bind the evidence to the installed implementation. Leave #14163
+open while an observation is failed or missing. A fixture pass is not a hosted
+receipt. A changed workflow or reporter needs a fresh observation.
+
+Keep readback API failure injection in fixtures. For a live publication failure,
+retain the run and any generated report. Then inspect the bot comment. If
+readback content differs from the posted report, stop and investigate. Do not
+retry integrity failures or access denials. Retry transient API failures only
+under the repository's
+[bounded retry policy](../../.agents/skills/_shared/pr-follow-up.md#bounded-retry-policy).
+An allowed retry regenerates the report. For an existing bot report, recovery
+requires exactly one copy matching the intended published body, including
+truncation. A mismatch or duplicate stops recovery without posting or editing.
+
+Observe duplicate recovery through one separately authorized report-job
+rerun. Record the bot report's ID and body, the opening comments, and the prior
+artifact before the rerun. Require unchanged comments afterward, one merge
+report, and an unchanged prior artifact. The rerun's artifact must contain its
+report and revision-bound receipt. If no rerun is permitted or observed, this
+recovery observation stays pending. The ordinary report job does not invoke the
+reporter a second time to produce this evidence.
